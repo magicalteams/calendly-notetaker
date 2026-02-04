@@ -146,7 +146,27 @@ function getCalendarClient() {
     }
 
     // Parse the JSON key from environment variable
-    const credentials = JSON.parse(serviceAccountKey);
+    let credentials;
+    try {
+        credentials = JSON.parse(serviceAccountKey);
+    } catch (parseError) {
+        // Log helpful debugging info
+        console.error("❌ Failed to parse GOOGLE_SERVICE_ACCOUNT_KEY as JSON");
+        console.error("Parse error:", parseError.message);
+        console.error("First 100 chars of key:", serviceAccountKey.substring(0, 100));
+        console.error("Key length:", serviceAccountKey.length);
+        throw new Error(`Invalid GOOGLE_SERVICE_ACCOUNT_KEY JSON: ${parseError.message}`);
+    }
+
+    // Validate required fields
+    if (!credentials.client_email || !credentials.private_key) {
+        console.error("❌ Missing required fields in service account key");
+        console.error("Has client_email:", !!credentials.client_email);
+        console.error("Has private_key:", !!credentials.private_key);
+        throw new Error("Service account key missing client_email or private_key");
+    }
+
+    console.log("✅ Parsed service account key for:", credentials.client_email);
 
     // Create auth client using service account credentials
     const auth = new google.auth.GoogleAuth({
