@@ -454,7 +454,10 @@ export async function POST(request) {
             await calendar.events.patch({
                 calendarId: calendarId,
                 eventId: externalId,
-                sendUpdates: "all", // Send email notifications to all attendees
+                // Note: Using "none" because service accounts can't send invites
+                // without Domain-Wide Delegation. The notetaker will still be
+                // added to the event, they just won't receive an email notification.
+                sendUpdates: "none",
                 requestBody: {
                     attendees: updatedAttendees,
                 },
