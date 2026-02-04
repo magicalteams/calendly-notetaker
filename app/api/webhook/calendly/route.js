@@ -133,7 +133,12 @@ function getCalendarClient() {
  * @returns {object} - Extracted event details
  */
 function extractEventDetails(payload) {
+    // Log raw payload structure for debugging
+    console.log("🔍 Raw payload keys:", Object.keys(payload));
+
     const scheduledEvent = payload.scheduled_event || {};
+    console.log("🔍 scheduled_event keys:", Object.keys(scheduledEvent));
+
     const eventMemberships = scheduledEvent.event_memberships || [];
     const invitees = payload.invitee || {};
 
@@ -146,7 +151,24 @@ function extractEventDetails(payload) {
     const inviteeEmail = invitees.email?.toLowerCase() || "";
 
     // Get the external calendar event ID (Google Calendar event ID)
-    const externalId = scheduledEvent.external_id || "";
+    // Check multiple possible locations
+    let externalId = scheduledEvent.external_id || "";
+
+    // Try alternative locations if not found
+    if (!externalId && scheduledEvent.calendar_event) {
+        console.log("🔍 calendar_event:", scheduledEvent.calendar_event);
+        externalId = scheduledEvent.calendar_event.external_id || "";
+    }
+
+    // Check if there's a location or conferencing data with the event ID
+    if (!externalId && scheduledEvent.location) {
+        console.log("🔍 location:", scheduledEvent.location);
+    }
+
+    // Log the scheduled_event URI - we might need to fetch details via API
+    if (scheduledEvent.uri) {
+        console.log("🔍 scheduled_event.uri:", scheduledEvent.uri);
+    }
 
     // Get the calendar ID (host's calendar)
     const calendarId = hostEmail; // Typically the host's email is the calendar ID
@@ -160,6 +182,8 @@ function extractEventDetails(payload) {
         eventUri: scheduledEvent.uri || "",
         startTime: scheduledEvent.start_time,
         endTime: scheduledEvent.end_time,
+        // Include full scheduled_event for debugging
+        _rawScheduledEvent: scheduledEvent,
     };
 }
 
