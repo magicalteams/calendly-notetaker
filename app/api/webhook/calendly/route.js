@@ -41,6 +41,48 @@ const SYNC_DELAY_MS = 5000;
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
 /**
+ * Retry utility with exponential backoff for handling rate limits.
+ * 
+ * @param {Function} fn - Async function to retry
+ * @param {object} options - Retry options
+ * @param {number} options.maxRetries - Maximum number of retries (default: 3)
+ * @param {number} options.baseDelay - Base delay in ms (default: 1000)
+ * @param {string} options.operation - Description of the operation for logging
+ * @returns {Promise<any>} - Result of the function
+ */
+async function withRetry(fn, { maxRetries = 3, baseDelay = 1000, operation = "operation" } = {}) {
+    let lastError;
+
+    for (let attempt = 1; attempt <= maxRetries + 1; attempt++) {
+        try {
+            return await fn();
+        } catch (error) {
+            lastError = error;
+
+            // Check if this is a rate limit error (403 with "Rate Limit Exceeded" or 429)
+            const isRateLimited =
+                error.code === 429 ||
+                (error.code === 403 && error.message?.includes("Rate Limit"));
+
+            if (isRateLimited && attempt <= maxRetries) {
+                const delay = baseDelay * Math.pow(2, attempt - 1); // Exponential backoff
+                console.log(`⚠️ Rate limited on ${operation}. Retrying in ${delay}ms (attempt ${attempt}/${maxRetries})...`);
+                await sleep(delay);
+            } else if (!isRateLimited) {
+                // Not a rate limit error, don't retry
+                throw error;
+            } else {
+                // Max retries exceeded
+                console.error(`❌ Max retries exceeded for ${operation}`);
+                throw error;
+            }
+        }
+    }
+
+    throw lastError;
+}
+
+/**
  * Fetches the full scheduled event details from Calendly API.
  * This is needed because the webhook payload doesn't include the external_id
  * (Google Calendar event ID) - we need to fetch it separately.
@@ -398,10 +440,13 @@ export async function POST(request) {
 
         let existingEvent;
         try {
-            const response = await calendar.events.get({
-                calendarId: calendarId,
-                eventId: externalId,
-            });
+            const response = await withRetry(
+                () => calendar.events.get({
+                    calendarId: calendarId,
+                    eventId: externalId,
+                }),
+                { operation: "fetching calendar event" }
+            );
             existingEvent = response.data;
             console.log("✅ Successfully fetched existing event");
         } catch (error) {
@@ -452,17 +497,19 @@ export async function POST(request) {
 
         // Update the event with the new attendee list
         try {
-            await calendar.events.patch({
-                calendarId: calendarId,
-                eventId: externalId,
-                // Note: Using "none" because service accounts can't send invites
-                // without Domain-Wide Delegation. The notetaker will still be
-                // added to the event, they just won't receive an email notification.
-                sendUpdates: "none",
-                requestBody: {
-                    attendees: updatedAttendees,
-                },
-            });
+            await withRetry(
+                () => calendar.events.patch({
+                    calendarId: calendarId,
+                    eventId: externalId,
+                    // Note: Using "none" to avoid email notifications.
+                    // With Domain-Wide Delegation, we could use "all" if needed.
+                    sendUpdates: "none",
+                    requestBody: {
+                        attendees: updatedAttendees,
+                    },
+                }),
+                { operation: "updating calendar event" }
+            );
             console.log("✅ Successfully added notetaker to event");
         } catch (error) {
             console.error("❌ Error updating event:", error.message);
