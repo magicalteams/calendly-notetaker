@@ -132,11 +132,12 @@ function verifyCalendlySignature(payload, signatureHeader, signingKey) {
 
 /**
  * Initializes and returns an authenticated Google Calendar API client.
- * Uses a service account for authentication.
+ * Uses a service account with Domain-Wide Delegation to impersonate the calendar owner.
  *
+ * @param {string} subjectEmail - The email of the user to impersonate (calendar owner)
  * @returns {google.calendar_v3.Calendar} - Authenticated Calendar API client
  */
-function getCalendarClient() {
+function getCalendarClient(subjectEmail) {
     const serviceAccountKey = process.env.GOOGLE_SERVICE_ACCOUNT_KEY;
 
     if (!serviceAccountKey) {
@@ -167,14 +168,14 @@ function getCalendarClient() {
     }
 
     console.log("✅ Parsed service account key for:", credentials.client_email);
+    console.log("🔑 Impersonating user:", subjectEmail);
 
-    // Create auth client using service account credentials
-    const auth = new google.auth.GoogleAuth({
-        credentials: {
-            client_email: credentials.client_email,
-            private_key: credentials.private_key,
-        },
+    // Create JWT client with Domain-Wide Delegation (impersonation)
+    const auth = new google.auth.JWT({
+        email: credentials.client_email,
+        key: credentials.private_key,
         scopes: ["https://www.googleapis.com/auth/calendar"],
+        subject: subjectEmail, // Impersonate the calendar owner
     });
 
     // Return the Calendar API client
@@ -387,8 +388,8 @@ export async function POST(request) {
             await sleep(SYNC_DELAY_MS);
         }
 
-        // Initialize Google Calendar API client
-        const calendar = getCalendarClient();
+        // Initialize Google Calendar API client (impersonating the calendar owner)
+        const calendar = getCalendarClient(calendarId);
 
         // First, get the current event to retrieve existing attendees
         console.log(
