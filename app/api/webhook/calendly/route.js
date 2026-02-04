@@ -41,6 +41,41 @@ const SYNC_DELAY_MS = 5000;
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
 /**
+ * Fetches the full scheduled event details from Calendly API.
+ * This is needed because the webhook payload doesn't include the external_id
+ * (Google Calendar event ID) - we need to fetch it separately.
+ *
+ * @param {string} eventUri - The Calendly event URI (e.g., https://api.calendly.com/scheduled_events/xxx)
+ * @returns {Promise<object>} - Full event details including calendar_event
+ */
+async function fetchCalendlyEventDetails(eventUri) {
+    const calendlyApiToken = process.env.CALENDLY_API_TOKEN;
+
+    if (!calendlyApiToken) {
+        throw new Error("CALENDLY_API_TOKEN environment variable is not set");
+    }
+
+    console.log(`📡 Fetching event details from Calendly: ${eventUri}`);
+
+    const response = await fetch(eventUri, {
+        headers: {
+            "Authorization": `Bearer ${calendlyApiToken}`,
+            "Content-Type": "application/json",
+        },
+    });
+
+    if (!response.ok) {
+        const errorText = await response.text();
+        throw new Error(`Calendly API error: ${response.status} - ${errorText}`);
+    }
+
+    const data = await response.json();
+    console.log("✅ Fetched event details from Calendly");
+
+    return data.resource;
+}
+
+/**
  * Verifies the Calendly webhook signature using HMAC-SHA256.
  *
  * Calendly sends the signature in the "Calendly-Webhook-Signature" header.
@@ -276,36 +311,75 @@ export async function POST(request) {
 
         console.log(`✅ Host "${eventDetails.hostEmail}" is authorized`);
 
-        // Validate that we have the external ID (Google Calendar event ID)
-        if (!eventDetails.externalId) {
-            console.error(
-                "❌ No external_id found in payload - cannot update Google Calendar event"
-            );
+        // Get the external ID (Google Calendar event ID)
+        // If not in webhook payload, fetch from Calendly API
+        let externalId = eventDetails.externalId;
+        let calendarId = eventDetails.calendarId;
+
+        if (!externalId && eventDetails.eventUri) {
+            console.log("ℹ️ external_id not in webhook, fetching from Calendly API...");
+
+            // Wait for Calendly-to-Google Calendar sync to complete BEFORE fetching
+            console.log(`⏳ Waiting ${SYNC_DELAY_MS}ms for Calendly sync to complete...`);
+            await sleep(SYNC_DELAY_MS);
+
+            try {
+                const fullEventDetails = await fetchCalendlyEventDetails(eventDetails.eventUri);
+                console.log("🔍 Full event calendar_event:", fullEventDetails.calendar_event);
+
+                if (fullEventDetails.calendar_event) {
+                    externalId = fullEventDetails.calendar_event.external_id || "";
+                    // The calendar_event might also have the calendar ID
+                    if (fullEventDetails.calendar_event.calendar) {
+                        console.log("🔍 Calendar info:", fullEventDetails.calendar_event.calendar);
+                    }
+                }
+
+                if (!externalId) {
+                    console.error("❌ No external_id found even after fetching from Calendly API");
+                    console.log("🔍 Full event details:", JSON.stringify(fullEventDetails, null, 2));
+                    return NextResponse.json(
+                        {
+                            error: "No Google Calendar event ID found",
+                            hint: "The event may not be synced to Google Calendar yet, or calendar sync is not enabled for this user"
+                        },
+                        { status: 400 }
+                    );
+                }
+
+                console.log(`✅ Found external_id from Calendly API: ${externalId}`);
+            } catch (apiError) {
+                console.error("❌ Error fetching from Calendly API:", apiError.message);
+                return NextResponse.json(
+                    { error: "Failed to fetch event details from Calendly", message: apiError.message },
+                    { status: 500 }
+                );
+            }
+        } else if (!externalId) {
+            console.error("❌ No external_id and no event URI to fetch from");
             return NextResponse.json(
-                { error: "Missing external_id in payload" },
+                { error: "Missing external_id in payload and no event URI available" },
                 { status: 400 }
             );
+        } else {
+            // We have external_id from webhook, still wait for sync
+            console.log(`⏳ Waiting ${SYNC_DELAY_MS}ms for Calendly sync to complete...`);
+            await sleep(SYNC_DELAY_MS);
         }
-
-        // Wait for Calendly-to-Google Calendar sync to complete
-        console.log(
-            `⏳ Waiting ${SYNC_DELAY_MS}ms for Calendly sync to complete...`
-        );
-        await sleep(SYNC_DELAY_MS);
 
         // Initialize Google Calendar API client
         const calendar = getCalendarClient();
 
         // First, get the current event to retrieve existing attendees
         console.log(
-            `📥 Fetching event: ${eventDetails.externalId} from calendar: ${eventDetails.calendarId}`
+            `📥 Fetching event: ${externalId} from calendar: ${calendarId}`
         );
 
         let existingEvent;
         try {
             const response = await calendar.events.get({
-                calendarId: eventDetails.calendarId,
-                eventId: eventDetails.externalId,
+                calendarId: calendarId,
+                eventId: externalId,
             });
             existingEvent = response.data;
             console.log("✅ Successfully fetched existing event");
@@ -317,7 +391,7 @@ export async function POST(request) {
                 return NextResponse.json(
                     {
                         error: "Event not found in Google Calendar - may not have synced yet",
-                        externalId: eventDetails.externalId,
+                        externalId: externalId,
                     },
                     { status: 404 }
                 );
@@ -358,8 +432,8 @@ export async function POST(request) {
         // Update the event with the new attendee list
         try {
             await calendar.events.patch({
-                calendarId: eventDetails.calendarId,
-                eventId: eventDetails.externalId,
+                calendarId: calendarId,
+                eventId: externalId,
                 sendUpdates: "all", // Send email notifications to all attendees
                 requestBody: {
                     attendees: updatedAttendees,
@@ -377,7 +451,7 @@ export async function POST(request) {
         return NextResponse.json({
             success: true,
             message: "Notetaker added successfully",
-            eventId: eventDetails.externalId,
+            eventId: externalId,
             eventName: eventDetails.eventName,
             attendees: updatedAttendees.map((a) => a.email),
             processingTime: `${duration}ms`,
